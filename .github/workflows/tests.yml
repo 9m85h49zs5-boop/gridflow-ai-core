@@ -60,6 +60,6 @@ jobs:
         EOF
     - name: Test with pytest
       env:
-        PYTHONPATH: .
+        PYTHONPATH: ${{ github.workspace }}
       run: |
-        python -m pytest -o python_files="*.py" tests/
+        python -m pytest tests/
