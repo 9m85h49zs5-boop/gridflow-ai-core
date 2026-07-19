@@ -1,0 +1,46 @@
+import json
+import os
+
+class HeuristicComputeRouter:
+    def __init__(self, config_path="regions_profile.json"):
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+            
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+        self.regions = self.config["regions"]
+
+    def find_optimal_region(self, current_region, latency_threshold_ms=150, compute_power_kw=100, run_hours=24):
+        """
+        Calculates estimated savings under the assumptions of the simulation.
+        """
+        if current_region not in self.regions:
+            raise ValueError(f"Source region {current_region} is not defined in profiles.")
+
+        base = self.regions[current_region]
+        base_cost = compute_power_kw * run_hours * base["energy_price_kwh"]
+        base_carbon = (compute_power_kw * run_hours * base["carbon_g_kwh"]) / 1000
+
+        best_region = current_region
+        min_cost = base_cost
+        
+        for code, metrics in self.regions.items():
+            # Фильтрация по допустимому уровню задержки
+            if metrics["latency_to_origin_ms"] > latency_threshold_ms:
+                continue
+
+            cost = compute_power_kw * run_hours * metrics["energy_price_kwh"]
+            if cost < min_cost:
+                min_cost = cost
+                best_region = code
+
+        estimated_savings_usd = base_cost - min_cost
+        estimated_savings_percent = (estimated_savings_usd / base_cost) * 100 if base_cost > 0 else 0
+
+        return {
+            "source_region": current_region,
+            "target_region": best_region,
+            "estimated_savings_usd": round(estimated_savings_usd, 2),
+            "estimated_savings_percent": round(estimated_savings_percent, 1),
+            "baseline_cost_usd": round(base_cost, 2)
+        }
