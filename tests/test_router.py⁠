@@ -1,0 +1,41 @@
+import pytest
+import json
+import os
+from router import HeuristicComputeRouter
+
+@pytest.fixture
+def temp_config(tmp_path):
+    config = {
+        "regions": {
+            "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300},
+            "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10}
+        }
+    }
+    config_file = tmp_path / "test_regions.json"
+    config_file.write_text(json.dumps(config))
+    return str(config_file)
+
+def test_router_respects_latency_threshold(temp_config):
+    router = HeuristicComputeRouter(config_path=temp_config)
+    # Пытаемся оптимизировать из дорогого региона, но ставим жесткий лимит по задержке в 50мс.
+    # Дешевый регион (300мс) должен быть отброшен по правилам, и мы останемся в дорогом.
+    result = router.find_optimal_region(
+        current_region="expensive-fast", 
+        latency_threshold_ms=50, 
+        compute_power_kw=10, 
+        run_hours=1
+    )
+    assert result["target_region"] == "expensive-fast"
+    assert result["estimated_savings_usd"] == 0.0
+
+def test_router_selects_cheaper_region_within_latency(temp_config):
+    router = HeuristicComputeRouter(config_path=temp_config)
+    # Ослабляем лимит задержки до 400мс. Теперь дешевый регион проходит фильтр и выбирается системой.
+    result = router.find_optimal_region(
+        current_region="expensive-fast", 
+        latency_threshold_ms=400, 
+        compute_power_kw=10, 
+        run_hours=1
+    )
+    assert result["target_region"] == "cheap-slow"
+    assert result["estimated_savings_usd"] > 0
