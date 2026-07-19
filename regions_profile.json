@@ -1,0 +1,22 @@
+{
+  "regions": {
+    "us-east-ercot": {
+      "name": "US East (Texas ERCOT)",
+      "energy_price_kwh": 0.12,
+      "carbon_g_kwh": 420,
+      "latency_to_origin_ms": 20
+    },
+    "eu-north-nordpool": {
+      "name": "EU North (Sweden/Norway)",
+      "energy_price_kwh": 0.04,
+      "carbon_g_kwh": 90,
+      "latency_to_origin_ms": 110
+    },
+    "ap-northeast-jepx": {
+      "name": "Asia Pacific (Tokyo JEPX)",
+      "energy_price_kwh": 0.22,
+      "carbon_g_kwh": 510,
+      "latency_to_origin_ms": 190
+    }
+  }
+}
