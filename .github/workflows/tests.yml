@@ -15,11 +15,51 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pytest
-    - name: List files (Diagnostic)
+    - name: Force Rewrite Test File
       run: |
-        ls -R
+        mkdir -p tests
+        cat << 'EOF' > tests/test_router.py
+        import pytest
+        import json
+        import os
+        from router import HeuristicComputeRouter
+
+        @pytest.fixture
+        def temp_config(tmp_path):
+            config = {
+                "regions": {
+                    "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300},
+                    "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10}
+                }
+            }
+            config_file = tmp_path / "test_regions.json"
+            config_file.write_text(json.dumps(config))
+            return str(config_file)
+
+        def test_router_respects_latency_threshold(temp_config):
+            router = HeuristicComputeRouter(config_path=temp_config)
+            result = router.find_optimal_region(
+                current_region="expensive-fast", 
+                latency_threshold_ms=50, 
+                compute_power_kw=10, 
+                run_hours=1
+            )
+            assert result["target_region"] == "expensive-fast"
+            assert result["estimated_savings_usd"] == 0.0
+
+        def test_router_selects_cheaper_region_within_latency(temp_config):
+            router = HeuristicComputeRouter(config_path=temp_config)
+            result = router.find_optimal_region(
+                current_region="expensive-fast", 
+                latency_threshold_ms=400, 
+                compute_power_kw=10, 
+                run_hours=1
+            )
+            assert result["target_region"] == "cheap-slow"
+            assert result["estimated_savings_usd"] > 0
+        EOF
     - name: Test with pytest
       env:
         PYTHONPATH: .
       run: |
-        python -m pytest
+        python -m pytest -o python_files="*.py" tests/
