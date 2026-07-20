@@ -17,7 +17,7 @@ jobs:
         pip install pytest
     - name: Force Ensure Core Files Exist
       run: |
-        # 1. Автоматически воссоздаем ядро логики router.py в корне проекта
+        # 1. Воссоздаем обновленное ядро router.py с учетом миграции данных
         cat << 'EOF' > router.py
         import json
 
@@ -27,71 +27,95 @@ jobs:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
 
-            def find_optimal_region(self, current_region, latency_threshold_ms, compute_power_kw, run_hours):
+            def find_optimal_region(self, current_region, latency_threshold_ms, compute_power_kw, run_hours, checkpoint_size_gb=0, max_total_time_hours=None):
                 regions = self.config.get("regions", {})
                 current_data = regions.get(current_region)
                 if not current_data:
-                    return {"target_region": current_region, "estimated_savings_usd": 0.0}
+                    return {"target_region": current_region, "estimated_savings_usd": 0.0, "migration_time_hours": 0.0}
                     
                 current_price = current_data.get("energy_price_kwh", 0.0)
                 current_cost = compute_power_kw * run_hours * current_price
                 
                 best_region = current_region
                 min_cost = current_cost
+                final_migration_time = 0.0
                 
                 for r_id, r_data in regions.items():
-                    if r_data.get("latency_to_origin_ms", 9999) <= latency_threshold_ms:
-                        price = r_data.get("energy_price_kwh", 0.0)
-                        cost = compute_power_kw * run_hours * price
-                        if cost < min_cost:
-                            min_cost = cost
-                            best_region = r_id
+                    # Проверка базового пинга
+                    if r_data.get("latency_to_origin_ms", 9999) > latency_threshold_ms:
+                        continue
+                        
+                    # Расчет накладных расходов на миграцию GPU-чекпоинта
+                    migration_time_hours = 0.0
+                    if r_id != current_region and checkpoint_size_gb > 0:
+                        speed_mbps = r_data.get("network_speed_mbps", 100)
+                        # Переводим Гб в Мегабиты (~8000) и делим на скорость и секунды в часе
+                        migration_time_hours = (checkpoint_size_gb * 8000) / (speed_mbps * 3600)
+                    
+                    # Проверяем, укладываемся ли в общий дедлайн по времени
+                    if max_total_time_hours and (run_hours + migration_time_hours) > max_total_time_hours:
+                        continue
+                        
+                    price = r_data.get("energy_price_kwh", 0.0)
+                    cost = compute_power_kw * run_hours * price
+                    
+                    if cost < min_cost:
+                        min_cost = cost
+                        best_region = r_id
+                        final_migration_time = migration_time_hours
                             
                 savings = current_cost - min_cost
                 return {
                     "target_region": best_region,
-                    "estimated_savings_usd": float(savings)
+                    "estimated_savings_usd": round(float(savings), 2),
+                    "migration_time_hours": round(final_migration_time, 2)
                 }
         EOF
 
-        # 2. Автоматически воссоздаем эталонный файл тестов в папке tests
+        # 2. Обновляем автотесты под новые параметры
         mkdir -p tests
         cat << 'EOF' > tests/test_router.py
         import pytest
         import json
-        import os
         from router import HeuristicComputeRouter
 
         @pytest.fixture
         def temp_config(tmp_path):
             config = {
                 "regions": {
-                    "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300},
-                    "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10}
+                    "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300, "network_speed_mbps": 100},
+                    "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10, "network_speed_mbps": 1000}
                 }
             }
             config_file = tmp_path / "test_regions.json"
             config_file.write_text(json.dumps(config))
             return str(config_file)
 
-        def test_router_respects_latency_threshold(temp_config):
+        def test_router_skips_cheap_region_if_migration_violates_deadline(temp_config):
             router = HeuristicComputeRouter(config_path=temp_config)
-            result = router.find_optimal_region(
-                current_region="expensive-fast", 
-                latency_threshold_ms=50, 
-                compute_power_kw=10, 
-                run_hours=1
-            )
-            assert result["target_region"] == "expensive-fast"
-            assert result["estimated_savings_usd"] == 0.0
-
-        def test_router_selects_cheaper_region_within_latency(temp_config):
-            router = HeuristicComputeRouter(config_path=temp_config)
+            # Если чекпоинт весит 500 Гб, то на скорости 100 Мбит/с он будет качаться ~11 часов.
+            # Общее время (1 + 11 = 12) превысит лимит в 5 часов. Роутер должен остаться в дорогом регионе.
             result = router.find_optimal_region(
                 current_region="expensive-fast", 
                 latency_threshold_ms=400, 
                 compute_power_kw=10, 
-                run_hours=1
+                run_hours=1,
+                checkpoint_size_gb=500,
+                max_total_time_hours=5
+            )
+            assert result["target_region"] == "expensive-fast"
+            assert result["estimated_savings_usd"] == 0.0
+
+        def test_router_migrates_if_within_deadline(temp_config):
+            router = HeuristicComputeRouter(config_path=temp_config)
+            # Маленький чекпоинт (10 Гб) скачается быстро, лимит в 5 часов не нарушен.
+            result = router.find_optimal_region(
+                current_region="expensive-fast", 
+                latency_threshold_ms=400, 
+                compute_power_kw=10, 
+                run_hours=1,
+                checkpoint_size_gb=10,
+                max_total_time_hours=5
             )
             assert result["target_region"] == "cheap-slow"
             assert result["estimated_savings_usd"] > 0
