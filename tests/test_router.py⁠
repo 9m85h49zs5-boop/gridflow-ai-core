@@ -1,65 +1,55 @@
-name: Python Package running pytest
+import pytest
+import json
+from router import HeuristicComputeRouter
 
-on: [push, pull_request]
+@pytest.fixture
+def temp_config(tmp_path):
+    config = {
+        "regions": {
+            "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300, "network_speed_mbps": 100},
+            "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10, "network_speed_mbps": 1000}
+        }
+    }
+    config_file = tmp_path / "test_regions.json"
+    config_file.write_text(json.dumps(config))
+    return str(config_file)
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pytest
-    - name: Force Rewrite Test File
-      run: |
-        mkdir -p tests
-        cat << 'EOF' > tests/test_router.py
-        import pytest
-        import json
-        import os
-        from router import HeuristicComputeRouter
+def test_router_skips_cheap_region_if_migration_violates_deadline(temp_config):
+    router = HeuristicComputeRouter(config_path=temp_config)
+    result = router.find_optimal_region(
+        current_region="expensive-fast", 
+        latency_threshold_ms=400, 
+        compute_power_kw=10, 
+        run_hours=1,
+        checkpoint_size_gb=500,
+        max_total_time_hours=5
+    )
+    assert result["target_region"] == "expensive-fast"
+    assert result["estimated_savings_usd"] == 0.0
 
-        @pytest.fixture
-        def temp_config(tmp_path):
-            config = {
-                "regions": {
-                    "cheap-slow": {"name": "Cheap Region", "energy_price_kwh": 0.02, "carbon_g_kwh": 50, "latency_to_origin_ms": 300},
-                    "expensive-fast": {"name": "Expensive Region", "energy_price_kwh": 0.20, "carbon_g_kwh": 400, "latency_to_origin_ms": 10}
-                }
-            }
-            config_file = tmp_path / "test_regions.json"
-            config_file.write_text(json.dumps(config))
-            return str(config_file)
+def test_router_migrates_if_within_deadline(temp_config):
+    router = HeuristicComputeRouter(config_path=temp_config)
+    result = router.find_optimal_region(
+        current_region="expensive-fast", 
+        latency_threshold_ms=400, 
+        compute_power_kw=10, 
+        run_hours=1,
+        checkpoint_size_gb=10,
+        max_total_time_hours=5
+    )
+    assert result["target_region"] == "cheap-slow"
+    assert result["estimated_savings_usd"] > 0
 
-        def test_router_respects_latency_threshold(temp_config):
-            router = HeuristicComputeRouter(config_path=temp_config)
-            result = router.find_optimal_region(
-                current_region="expensive-fast", 
-                latency_threshold_ms=50, 
-                compute_power_kw=10, 
-                run_hours=1
-            )
-            assert result["target_region"] == "expensive-fast"
-            assert result["estimated_savings_usd"] == 0.0
-
-        def test_router_selects_cheaper_region_within_latency(temp_config):
-            router = HeuristicComputeRouter(config_path=temp_config)
-            result = router.find_optimal_region(
-                current_region="expensive-fast", 
-                latency_threshold_ms=400, 
-                compute_power_kw=10, 
-                run_hours=1
-            )
-            assert result["target_region"] == "cheap-slow"
-            assert result["estimated_savings_usd"] > 0
-        EOF
-    - name: Test with pytest
-      env:
-        PYTHONPATH: .
-      run: |
-        python -m pytest tests/
+def test_orchestrator_generates_valid_k8s_node_selector(temp_config):
+    router = HeuristicComputeRouter(config_path=temp_config)
+    active_routing = router.trigger_active_migration(
+        task_name="llm-finetuning",
+        current_region="expensive-fast",
+        latency_threshold_ms=400,
+        compute_power_kw=10,
+        run_hours=5,
+        checkpoint_size_gb=1
+    )
+    assert active_routing["decision"]["target_region"] == "cheap-slow"
+    assert active_routing["k8s_manifest"]["spec"]["nodeSelector"]["topology.kubernetes.io/region"] == "cheap-slow"
+    assert active_routing["orchestration_status"]["status_code"] == 200
